@@ -1094,11 +1094,9 @@ export function activate(context: vscode.ExtensionContext) {
         } // ShadowFileItem and MergedDirectoryItem are subclasses of TreeItem
 
         // --- Execute Actions ---
-        if (projectRootPath) {
-            logChannel.appendLine(`Opening containing project folder in new window: ${projectRootPath}`);
-            const folderUri = vscode.Uri.file(projectRootPath);
-            // Open the folder in a new window
-            await vscode.commands.executeCommand('vscode.openFolder', folderUri, { forceNewWindow: true });
+        if (projectRootPath && resourceUri) {
+            logChannel.appendLine(`Revealing item in Explorer: ${resourceUri.fsPath}`);
+            await vscode.commands.executeCommand('revealInExplorer', resourceUri);
 
             // Removed the logic to open the file in the current window
 

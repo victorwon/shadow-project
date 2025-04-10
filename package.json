@@ -57,7 +57,7 @@
       },
       {
         "command": "shadow-project.openItemInContainingProject",
-        "title": "Open Item in Containing Project",
+        "title": "Reveal Item in Explorer",
         "category": "Shadow Projects"
       },
       {
