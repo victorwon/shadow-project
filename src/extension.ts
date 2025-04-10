@@ -558,90 +558,34 @@ export function activate(context: vscode.ExtensionContext) {
             : undefined;
     };
 
-    let treeDataProvider: MergedProjectsTreeDataProvider | undefined;
-    let shadowTreeView: vscode.TreeView<vscode.TreeItem> | undefined;
-    let viewDisposable: vscode.Disposable | undefined; // Store view disposable
-    let selectionDisposable: vscode.Disposable | undefined; // Store selection listener disposable
     const treeViewId = 'shadowProjectsMergedView';
-    const initializeOrUpdateTreeView = () => {
-        currentShadowProjects = getStoredProjects();
-        const currentWorkspaceRoot = getCurrentWorkspaceRoot();
 
-        // Determine if view should be active
-        const shouldBeActive = !!(currentWorkspaceRoot || currentShadowProjects.length > 0);
+    // --- Create Provider and View ONCE ---
+    logChannel.appendLine('Creating MergedProjectsTreeDataProvider instance...');
+    // Assign directly here using const. It's guaranteed to exist before commands/listeners run.
+    const treeDataProvider = new MergedProjectsTreeDataProvider(getCurrentWorkspaceRoot(), currentShadowProjects);
 
-        if (shouldBeActive) {
-            // --- Ensure Provider ---
-            if (!treeDataProvider) {
-                logChannel.appendLine('Creating new merged tree view provider.');
-                treeDataProvider = new MergedProjectsTreeDataProvider(currentWorkspaceRoot, currentShadowProjects);
-            } else {
-                 logChannel.appendLine('Updating existing merged tree view provider.');
-                 treeDataProvider.updateWorkspaceRoot(currentWorkspaceRoot);
-                 treeDataProvider.updateShadowProjects(currentShadowProjects);
-            }
+    logChannel.appendLine('Creating TreeView instance...');
+    const shadowTreeView = vscode.window.createTreeView(treeViewId, {
+        treeDataProvider: treeDataProvider,
+        canSelectMany: true
+    });
+    context.subscriptions.push(shadowTreeView); // Register TreeView for disposal
 
-            // --- Dispose Old View/Listeners (if they exist) ---
-            // Simplify disposal: just call dispose(), don't remove from context.subscriptions here.
-            if (selectionDisposable) {
-                selectionDisposable.dispose();
-                selectionDisposable = undefined;
-                logChannel.appendLine('Disposed previous selection listener.');
-            }
-            if (viewDisposable) {
-                viewDisposable.dispose(); // Dispose the TreeView itself
-                viewDisposable = undefined;
-                shadowTreeView = undefined; // Clear the reference
-                logChannel.appendLine('Disposed previous TreeView instance.');
-            }
-            // Note: Disposed items might remain in context.subscriptions, but VS Code should handle this.
+    // Register selection listener
+    const selectionDisposable = shadowTreeView.onDidChangeSelection(e => {
+        const selectionCount = e.selection.length;
+        logChannel.appendLine(`Selection changed. Count: ${selectionCount}`);
+        vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', selectionCount);
+    });
+    context.subscriptions.push(selectionDisposable);
 
-            // --- Create New View/Listeners ---
-            logChannel.appendLine('Creating new TreeView instance.');
-            shadowTreeView = vscode.window.createTreeView(treeViewId, {
-                treeDataProvider: treeDataProvider, // Use the existing/updated provider
-                canSelectMany: true
-            });
-            viewDisposable = shadowTreeView; // Store the new disposable
-            context.subscriptions.push(viewDisposable); // Add to main subscriptions
+    // Initial context setting
+    vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
+    logChannel.appendLine('Provider and View created and registered.');
 
-            selectionDisposable = shadowTreeView.onDidChangeSelection(e => {
-               const selectionCount = e.selection.length;
-               logChannel.appendLine(`Selection changed. Count: ${selectionCount}`);
-               vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', selectionCount);
-            });
-            context.subscriptions.push(selectionDisposable); // Add listener disposable too
+    // Removed initializeOrUpdateTreeView function and its initial call
 
-            // Initial context setting
-            vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
-
-        } else {
-            // --- View should NOT be active: Clean up everything ---
-            logChannel.appendLine('No workspace or shadow projects; ensuring view and provider are cleaned up.');
-            if (selectionDisposable) {
-                const selIdx = context.subscriptions.indexOf(selectionDisposable);
-                if (selIdx > -1) context.subscriptions.splice(selIdx, 1);
-                selectionDisposable.dispose();
-                selectionDisposable = undefined;
-            }
-            if (viewDisposable) {
-                const viewIdx = context.subscriptions.indexOf(viewDisposable);
-                if (viewIdx > -1) context.subscriptions.splice(viewIdx, 1);
-                viewDisposable.dispose();
-                viewDisposable = undefined;
-                shadowTreeView = undefined;
-            }
-            // We can keep the provider instance but clear its data
-            if (treeDataProvider) {
-                treeDataProvider.updateWorkspaceRoot(undefined);
-                treeDataProvider.updateShadowProjects([]);
-            }
-            vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
-        }
-    };
-
-    // Initial setup
-    initializeOrUpdateTreeView();
 
     // --- Register Commands ---
     logChannel.appendLine('Registering commands...');
@@ -680,10 +624,31 @@ export function activate(context: vscode.ExtensionContext) {
 
             if (name) {
                 const newProject: ShadowProject = { name, path: newPath };
+                const newProjectUri = folderUri[0]; // URI of the selected folder
+
+                // --- Add to Workspace Folders ---
+                const currentFolders = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f) : []; // Get a mutable copy
+                const folderIndex = currentFolders.findIndex(f => f.uri.fsPath === newProjectUri.fsPath);
+
+                if (folderIndex === -1) {
+                    logChannel.appendLine(`Adding folder to workspace: ${newProjectUri.fsPath}`);
+                    const success = vscode.workspace.updateWorkspaceFolders(currentFolders.length, 0, { uri: newProjectUri, name: `${name} (Shadow)` }); // Add at the end with name
+                    if (!success) {
+                        logChannel.appendLine('Failed to add folder to workspace.');
+                        vscode.window.showWarningMessage(`Failed to add folder "${name}" to the workspace automatically.`);
+                        // Proceed with adding to state anyway? Or stop? Let's proceed for now.
+                    }
+                } else {
+                    logChannel.appendLine(`Folder already exists in workspace: ${newProjectUri.fsPath}`);
+                }
+                // --- End Add to Workspace Folders ---
+
+
                 const updatedProjects = [...currentProjects, newProject];
                 await updateStoredProjects(updatedProjects);
                 logChannel.appendLine(`Added shadow project: ${JSON.stringify(newProject)}`);
-                initializeOrUpdateTreeView(); // Update the view
+                // REMOVED: Let onDidChangeWorkspaceFolders handle the update
+                // treeDataProvider.updateShadowProjects(updatedProjects);
                 vscode.window.showInformationMessage(`Shadow project "${name}" added.`);
             } else {
                  logChannel.appendLine('Shadow project name not provided.');
@@ -714,10 +679,40 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (selected) {
             const nameToRemove = selected.label;
+            const projectToRemove = currentProjects.find(p => p.name === nameToRemove); // Find the full project object
+
+            if (!projectToRemove) {
+                 logChannel.appendLine(`Could not find project details for removal: ${nameToRemove}`);
+                 vscode.window.showErrorMessage(`Could not find details for project "${nameToRemove}".`);
+                 return;
+            }
+
+            const pathToRemove = projectToRemove.path;
+            const uriToRemove = vscode.Uri.file(pathToRemove);
+
+            // --- Remove from Workspace Folders ---
+            const currentFolders = vscode.workspace.workspaceFolders;
+            if (currentFolders) {
+                const folderIndex = currentFolders.findIndex(f => f.uri.fsPath === uriToRemove.fsPath);
+                if (folderIndex !== -1) {
+                    logChannel.appendLine(`Removing folder from workspace: ${uriToRemove.fsPath}`);
+                    const success = vscode.workspace.updateWorkspaceFolders(folderIndex, 1); // Remove 1 folder at the found index
+                     if (!success) {
+                        logChannel.appendLine('Failed to remove folder from workspace.');
+                        vscode.window.showWarningMessage(`Failed to remove folder "${nameToRemove}" from the workspace automatically.`);
+                        // Proceed with removing from state anyway? Yes.
+                    }
+                } else {
+                     logChannel.appendLine(`Folder not found in workspace to remove: ${uriToRemove.fsPath}`);
+                }
+            }
+            // --- End Remove from Workspace Folders ---
+
             const updatedProjects = currentProjects.filter(p => p.name !== nameToRemove);
             await updateStoredProjects(updatedProjects);
             logChannel.appendLine(`Removed shadow project: ${nameToRemove}`);
-            initializeOrUpdateTreeView(); // Update the view
+             // REMOVED: Let onDidChangeWorkspaceFolders handle the update
+            // treeDataProvider.updateShadowProjects(updatedProjects);
             vscode.window.showInformationMessage(`Shadow project "${nameToRemove}" removed.`);
         } else {
              logChannel.appendLine('No shadow project selected for removal.');
@@ -774,7 +769,8 @@ export function activate(context: vscode.ExtensionContext) {
             );
             await updateStoredProjects(updatedProjects);
             logChannel.appendLine(`Renamed shadow project "${projectToRename.name}" to "${newName}"`);
-            initializeOrUpdateTreeView(); // Update the view
+            // Update provider directly after rename (doesn't change workspace folders)
+            treeDataProvider.updateShadowProjects(updatedProjects);
             vscode.window.showInformationMessage(`Shadow project "${projectToRename.name}" renamed to "${newName}".`);
         } else {
             logChannel.appendLine('New name not provided for renaming.');
@@ -1265,7 +1261,6 @@ export function activate(context: vscode.ExtensionContext) {
     // --- UPDATED COMMAND: Copy Workspace/Shadow File to Another Shadow Project ---
     const copyToShadow = vscode.commands.registerCommand('shadow-project.copyToShadow', async (sourceItem: vscode.TreeItem | vscode.Uri | ShadowFileItem) => {
         logChannel.appendLine('Command: copyToShadow triggered.');
-
         let sourceUri: vscode.Uri | undefined;
         let sourceBasePath: string | undefined; // Can be workspace root or a shadow project path
         let sourceShadowProjectName: string | undefined; // Name of the source shadow project, if applicable
@@ -1307,7 +1302,6 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage('Please right-click a file in the Shadow Projects view to copy.');
             return;
         }
-
         if (!sourceUri || !sourceBasePath) {
             logChannel.appendLine('Copy command missing necessary source file information (URI or BasePath).');
             vscode.window.showErrorMessage('Could not get source file details.');
@@ -1315,8 +1309,6 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // No longer need workspaceRoot check here, sourceBasePath covers it
-
-        // Ensure it's a file, not a directory (for now)
         // Ensure it's a file, not a directory (for now)
         try {
             const stat = await fsPromises.stat(sourceUri.fsPath);
@@ -1331,7 +1323,6 @@ export function activate(context: vscode.ExtensionContext) {
              return;
         }
 
-
         // Calculate relative path based on the determined sourceBasePath
         const relativePath = path.relative(sourceBasePath, sourceUri.fsPath);
         logChannel.appendLine(`Source path: ${sourceUri.fsPath}`);
@@ -1339,12 +1330,6 @@ export function activate(context: vscode.ExtensionContext) {
         logChannel.appendLine(`Relative path: ${relativePath}`);
 
         const currentProjects = getStoredProjects();
-        if (currentProjects.length === 0) {
-            logChannel.appendLine('No shadow projects configured.');
-            vscode.window.showInformationMessage('No shadow projects are configured to copy to.');
-            return;
-        }
-
         // Show Quick Pick to select target shadow project, filtering out the source project if applicable
         const targetProjects = currentProjects.filter(p => p.name !== sourceShadowProjectName);
 
@@ -1431,6 +1416,7 @@ export function activate(context: vscode.ExtensionContext) {
         let shadowUri: vscode.Uri | undefined;
         let shadowSource: MergedItemSource | undefined;
 
+        // Command can be triggered from palette (no arg) or context menu (TreeItem/Uri)
         if (shadowItem instanceof ShadowFileItem) {
             shadowUri = shadowItem.resourceUri;
             shadowSource = shadowItem.shadowSource;
@@ -1663,7 +1649,6 @@ export function activate(context: vscode.ExtensionContext) {
     // --- UPDATED COMMAND: Move Workspace/Shadow File to Another Shadow Project ---
     const moveToShadow = vscode.commands.registerCommand('shadow-project.moveToShadow', async (sourceItem: vscode.TreeItem | vscode.Uri | ShadowFileItem) => {
         logChannel.appendLine('Command: moveToShadow triggered.');
-
         let sourceUri: vscode.Uri | undefined;
         let sourceBasePath: string | undefined;
         let sourceShadowProjectName: string | undefined;
@@ -1704,7 +1689,6 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage('Please right-click a file in the Shadow Projects view to move.');
             return;
         }
-
         if (!sourceUri || !sourceBasePath) {
             logChannel.appendLine('Move command missing necessary source file information (URI or BasePath).');
             vscode.window.showErrorMessage('Could not get source file details.');
@@ -1712,8 +1696,6 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // No longer need workspaceRoot check here
-
-        // Ensure it's a file, not a directory (for now)
         // Ensure it's a file, not a directory (for now)
         try {
             const stat = await fsPromises.stat(sourceUri.fsPath);
@@ -1736,12 +1718,6 @@ export function activate(context: vscode.ExtensionContext) {
         logChannel.appendLine(`Relative path: ${relativePath}`);
 
         const currentProjects = getStoredProjects();
-        if (currentProjects.length === 0) {
-            logChannel.appendLine('No shadow projects configured.');
-            vscode.window.showInformationMessage('No shadow projects are configured to move to.');
-            return;
-        }
-
         // Show Quick Pick to select target shadow project, filtering out the source project if applicable
         const targetProjects = currentProjects.filter(p => p.name !== sourceShadowProjectName);
 
@@ -1852,10 +1828,13 @@ export function activate(context: vscode.ExtensionContext) {
         moveToShadow
 );
 
-    // Watch for workspace folder changes to update the tree view
+    // Watch for workspace folder changes to update the tree provider's root
     context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
-        logChannel.appendLine('Workspace folders changed, re-initializing/updating merged tree view.');
-        initializeOrUpdateTreeView();
+        logChannel.appendLine('Workspace folders changed, updating tree provider state.');
+        // Update both root and shadow projects list from storage
+        const latestProjects = getStoredProjects(); // Get latest list after change
+        treeDataProvider.updateWorkspaceRoot(getCurrentWorkspaceRoot());
+        treeDataProvider.updateShadowProjects(latestProjects);
     }));
 
     logChannel.appendLine(`Commands registered. Total subscriptions: ${context.subscriptions.length}`);
