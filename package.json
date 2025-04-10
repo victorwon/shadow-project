@@ -80,6 +80,16 @@
         "title": "Refresh Shadow Projects View",
         "category": "Shadow Projects",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "shadow-project.moveToWorkspace",
+        "title": "Move to Workspace",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.moveToShadow",
+        "title": "Move to Shadow Project...",
+        "category": "Shadow Projects"
       }
     ],
     "views": {
@@ -125,7 +135,7 @@
         },
         {
           "command": "shadow-project.copyToShadow",
-          "when": "view == shadowProjectsMergedView && viewItem == workspaceFile && shadowProject.selectionCount == 1",
+          "when": "view == shadowProjectsMergedView && (viewItem == workspaceFile || viewItem == shadowFile) && shadowProject.selectionCount == 1",
           "group": "5_diff@2"
         },
         {
@@ -137,6 +147,16 @@
           "command": "shadow-project.refreshView",
           "when": "view == shadowProjectsMergedView",
           "group": "navigation"
+        },
+        {
+          "command": "shadow-project.moveToWorkspace",
+          "when": "view == shadowProjectsMergedView && viewItem == shadowFile && shadowProject.selectionCount == 1",
+          "group": "5_diff@4"
+        },
+        {
+          "command": "shadow-project.moveToShadow",
+          "when": "view == shadowProjectsMergedView && (viewItem == workspaceFile || viewItem == shadowFile) && shadowProject.selectionCount == 1",
+          "group": "5_diff@5"
         }
       ],
       "view/title": [

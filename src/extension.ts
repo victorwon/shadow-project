@@ -1262,62 +1262,80 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // --- NEW COMMAND: Copy Workspace File to Shadow Project ---
-    const copyToShadow = vscode.commands.registerCommand('shadow-project.copyToShadow', async (workspaceItem: vscode.TreeItem | vscode.Uri) => {
+    // --- UPDATED COMMAND: Copy Workspace/Shadow File to Another Shadow Project ---
+    const copyToShadow = vscode.commands.registerCommand('shadow-project.copyToShadow', async (sourceItem: vscode.TreeItem | vscode.Uri | ShadowFileItem) => {
         logChannel.appendLine('Command: copyToShadow triggered.');
 
-        let workspaceUri: vscode.Uri | undefined;
+        let sourceUri: vscode.Uri | undefined;
+        let sourceBasePath: string | undefined; // Can be workspace root or a shadow project path
+        let sourceShadowProjectName: string | undefined; // Name of the source shadow project, if applicable
 
-        if (workspaceItem instanceof vscode.TreeItem && workspaceItem.resourceUri && workspaceItem.contextValue === 'workspaceFile') {
-            workspaceUri = workspaceItem.resourceUri;
-            logChannel.appendLine(`Copying from workspace context menu: ${workspaceUri?.fsPath}`);
-        } else if (workspaceItem instanceof vscode.Uri) {
-            // Allow triggering via URI, but need to verify it's a workspace file
-            const currentWorkspaceRoot = getCurrentWorkspaceRoot();
-            if (currentWorkspaceRoot && workspaceItem.fsPath.startsWith(currentWorkspaceRoot)) {
-                 workspaceUri = workspaceItem;
-                 logChannel.appendLine(`Copying from workspace URI: ${workspaceUri?.fsPath}`);
+        const currentWorkspaceRoot = getCurrentWorkspaceRoot(); // Get workspace root once
+
+        if (sourceItem instanceof ShadowFileItem) {
+            sourceUri = sourceItem.resourceUri;
+            sourceBasePath = sourceItem.shadowSource.projectPath;
+            sourceShadowProjectName = sourceItem.shadowSource.projectName;
+            logChannel.appendLine(`Copying from shadow file context menu: ${sourceUri?.fsPath} (Source Project: ${sourceShadowProjectName})`);
+        } else if (sourceItem instanceof vscode.TreeItem && sourceItem.resourceUri && sourceItem.contextValue === 'workspaceFile') {
+            sourceUri = sourceItem.resourceUri;
+            sourceBasePath = currentWorkspaceRoot;
+            logChannel.appendLine(`Copying from workspace file context menu: ${sourceUri?.fsPath}`);
+        } else if (sourceItem instanceof vscode.Uri) {
+            // Determine if URI is workspace or shadow
+            if (currentWorkspaceRoot && sourceItem.fsPath.startsWith(currentWorkspaceRoot)) {
+                sourceUri = sourceItem;
+                sourceBasePath = currentWorkspaceRoot;
+                logChannel.appendLine(`Copying from workspace URI: ${sourceUri?.fsPath}`);
             } else {
-                 logChannel.appendLine(`URI provided is not within the current workspace: ${workspaceItem.fsPath}`);
-                 vscode.window.showErrorMessage('Selected item is not a file within the current workspace.');
-                 return;
+                // Check if it's in a known shadow project
+                const currentProjects = getStoredProjects();
+                const foundShadow = currentProjects.find(p => sourceItem.fsPath.startsWith(p.path));
+                if (foundShadow) {
+                    sourceUri = sourceItem;
+                    sourceBasePath = foundShadow.path;
+                    sourceShadowProjectName = foundShadow.name;
+                    logChannel.appendLine(`Copying from shadow URI: ${sourceUri?.fsPath} (Source Project: ${sourceShadowProjectName})`);
+                } else {
+                    logChannel.appendLine(`URI provided is not within the workspace or any known shadow project: ${sourceItem.fsPath}`);
+                    vscode.window.showErrorMessage('Selected item is not a file within the workspace or a known shadow project.');
+                    return;
+                }
             }
         } else {
-            logChannel.appendLine('Copy command triggered without a valid workspace target file.');
-            vscode.window.showInformationMessage('Please right-click a workspace file in the Shadow Projects view to copy.');
+            logChannel.appendLine('Copy command triggered without a valid source file.');
+            vscode.window.showInformationMessage('Please right-click a file in the Shadow Projects view to copy.');
             return;
         }
 
-        if (!workspaceUri) {
-            logChannel.appendLine('Copy command missing necessary workspace file information.');
-            vscode.window.showErrorMessage('Could not get workspace file details.');
+        if (!sourceUri || !sourceBasePath) {
+            logChannel.appendLine('Copy command missing necessary source file information (URI or BasePath).');
+            vscode.window.showErrorMessage('Could not get source file details.');
             return;
         }
 
-        const workspaceRoot = getCurrentWorkspaceRoot();
-        if (!workspaceRoot) {
-            logChannel.appendLine('No workspace root found for copy operation.');
-            vscode.window.showWarningMessage('No workspace folder open.');
-            return;
-        }
+        // No longer need workspaceRoot check here, sourceBasePath covers it
 
         // Ensure it's a file, not a directory (for now)
+        // Ensure it's a file, not a directory (for now)
         try {
-            const stat = await fsPromises.stat(workspaceUri.fsPath);
+            const stat = await fsPromises.stat(sourceUri.fsPath);
             if (!stat.isFile()) {
-                logChannel.appendLine(`Attempted to copy a directory (not supported yet): ${workspaceUri.fsPath}`);
+                logChannel.appendLine(`Attempted to copy a directory (not supported yet): ${sourceUri.fsPath}`);
                 vscode.window.showInformationMessage('Copying directories is not yet supported. Please select a file.');
                 return;
             }
         } catch (error: any) {
-             logChannel.appendLine(`Error stating file ${workspaceUri.fsPath}: ${error.message}`);
+             logChannel.appendLine(`Error stating file ${sourceUri.fsPath}: ${error.message}`);
              vscode.window.showErrorMessage(`Could not access the file to copy: ${error.message}`);
              return;
         }
 
 
-        const relativePath = path.relative(workspaceRoot, workspaceUri.fsPath);
-        logChannel.appendLine(`Workspace path: ${workspaceUri.fsPath}`);
+        // Calculate relative path based on the determined sourceBasePath
+        const relativePath = path.relative(sourceBasePath, sourceUri.fsPath);
+        logChannel.appendLine(`Source path: ${sourceUri.fsPath}`);
+        logChannel.appendLine(`Source base path: ${sourceBasePath}`);
         logChannel.appendLine(`Relative path: ${relativePath}`);
 
         const currentProjects = getStoredProjects();
@@ -1327,20 +1345,28 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Show Quick Pick to select target shadow project
-        const items: vscode.QuickPickItem[] = currentProjects.map(proj => ({
+        // Show Quick Pick to select target shadow project, filtering out the source project if applicable
+        const targetProjects = currentProjects.filter(p => p.name !== sourceShadowProjectName);
+
+        if (targetProjects.length === 0) {
+             logChannel.appendLine('No other shadow projects available to copy to.');
+             vscode.window.showInformationMessage('No other shadow projects configured to copy to.');
+             return;
+        }
+
+        const items: vscode.QuickPickItem[] = targetProjects.map(proj => ({
             label: proj.name,
             description: proj.path,
-            detail: `Copy "${path.basename(workspaceUri!.fsPath)}" to this project`
+            detail: `Copy "${path.basename(sourceUri!.fsPath)}" to this project`
         }));
 
         const selectedItem = await vscode.window.showQuickPick(items, {
             placeHolder: 'Select the target shadow project',
-            title: `Copy "${path.basename(workspaceUri.fsPath)}" to Shadow Project`
+            title: `Copy "${path.basename(sourceUri.fsPath)}" to Shadow Project`
         });
 
         if (selectedItem) {
-            const selectedProject = currentProjects.find(proj => proj.name === selectedItem.label);
+            const selectedProject = targetProjects.find(proj => proj.name === selectedItem.label); // Find within filtered list
             if (selectedProject) {
                 const targetShadowPath = path.join(selectedProject.path, relativePath);
                 const targetShadowUri = vscode.Uri.file(targetShadowPath);
@@ -1376,7 +1402,7 @@ export function activate(context: vscode.ExtensionContext) {
                         logChannel.appendLine(`Ensured directory exists: ${targetDir}`);
 
                         // Perform the copy
-                        await fsPromises.copyFile(workspaceUri.fsPath, targetShadowPath);
+                        await fsPromises.copyFile(sourceUri.fsPath, targetShadowPath);
                         logChannel.appendLine(`File copied successfully to ${targetShadowPath}`);
                         vscode.window.showInformationMessage(`File copied to shadow project "${selectedProject.name}".`);
 
@@ -1398,7 +1424,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // --- NEW COMMAND: Copy Shadow File to Workspace ---
+    // --- COMMAND: Copy Shadow File to Workspace (No change needed here, already specific) ---
     const copyToWorkspace = vscode.commands.registerCommand('shadow-project.copyToWorkspace', async (shadowItem: ShadowFileItem | vscode.Uri) => {
         logChannel.appendLine('Command: copyToWorkspace triggered.');
 
@@ -1516,6 +1542,285 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // --- NEW COMMAND: Move Shadow File to Workspace ---
+    const moveToWorkspace = vscode.commands.registerCommand('shadow-project.moveToWorkspace', async (shadowItem: ShadowFileItem | vscode.Uri) => {
+        logChannel.appendLine('Command: moveToWorkspace triggered.');
+
+        let shadowUri: vscode.Uri | undefined;
+        let shadowSource: MergedItemSource | undefined;
+
+        // Extract info (similar to copyToWorkspace)
+        if (shadowItem instanceof ShadowFileItem) {
+            shadowUri = shadowItem.resourceUri;
+            shadowSource = shadowItem.shadowSource;
+            logChannel.appendLine(`Moving from shadow context menu: ${shadowUri?.fsPath} (Project: ${shadowSource?.projectName})`);
+        } else if (shadowItem instanceof vscode.Uri) {
+             shadowUri = shadowItem;
+             const currentProjects = getStoredProjects();
+             shadowSource = currentProjects
+                .map(p => ({ proj: p, relPath: path.relative(p.path, shadowUri!.fsPath) }))
+                .filter(o => !o.relPath.startsWith('..') && !path.isAbsolute(o.relPath))
+                .map(o => ({
+                    projectName: o.proj.name,
+                    projectPath: o.proj.path,
+                    fullPath: shadowUri!.fsPath,
+                    fileType: vscode.FileType.File // Assume file for now
+                }))[0];
+             if (shadowSource) {
+                 logChannel.appendLine(`Moving from shadow URI: ${shadowUri?.fsPath} (Project: ${shadowSource?.projectName})`);
+             } else {
+                 logChannel.appendLine(`URI provided is not within any known shadow project: ${shadowItem.fsPath}`);
+                 vscode.window.showErrorMessage('Selected item is not a file within a known shadow project.');
+                 return;
+             }
+        } else {
+            logChannel.appendLine('Move command triggered without a valid shadow target file.');
+            vscode.window.showInformationMessage('Please right-click a shadow file in the Shadow Projects view to move.');
+            return;
+        }
+
+        if (!shadowUri || !shadowSource) {
+            logChannel.appendLine('Move command missing necessary shadow file information.');
+            vscode.window.showErrorMessage('Could not get shadow file details.');
+            return;
+        }
+
+        const workspaceRoot = getCurrentWorkspaceRoot();
+        if (!workspaceRoot) {
+            logChannel.appendLine('No workspace root found for move operation.');
+            vscode.window.showWarningMessage('No workspace folder open to move into.');
+            return;
+        }
+
+         // Ensure it's a file, not a directory (for now)
+         try {
+            const stat = await fsPromises.stat(shadowUri.fsPath);
+            if (!stat.isFile()) {
+                logChannel.appendLine(`Attempted to move a directory (not supported yet): ${shadowUri.fsPath}`);
+                vscode.window.showInformationMessage('Moving directories is not yet supported. Please select a file.');
+                return;
+            }
+        } catch (error: any) {
+             logChannel.appendLine(`Error stating file ${shadowUri.fsPath}: ${error.message}`);
+             vscode.window.showErrorMessage(`Could not access the file to move: ${error.message}`);
+             return;
+        }
+
+        const relativePath = path.relative(shadowSource.projectPath, shadowUri.fsPath);
+        const targetWorkspacePath = path.join(workspaceRoot, relativePath);
+
+        logChannel.appendLine(`Shadow path: ${shadowUri.fsPath}`);
+        logChannel.appendLine(`Relative path: ${relativePath}`);
+        logChannel.appendLine(`Target workspace path: ${targetWorkspacePath}`);
+
+        try {
+            // Check if target exists and confirm overwrite
+            let proceed = true;
+            try {
+                await fsPromises.access(targetWorkspacePath);
+                logChannel.appendLine(`Target file already exists in workspace: ${targetWorkspacePath}`);
+                const confirmation = await vscode.window.showWarningMessage(
+                    `File already exists in the workspace:\n${relativePath}\n\nOverwrite?`,
+                    { modal: true },
+                    'Overwrite'
+                );
+                if (confirmation !== 'Overwrite') {
+                    proceed = false;
+                    logChannel.appendLine('User cancelled overwrite.');
+                } else {
+                    // If overwriting, delete the target first (rename won't overwrite across different mount points sometimes)
+                    // Although rename *should* handle overwrite on the same filesystem. Let's try without delete first.
+                    // await fsPromises.unlink(targetWorkspacePath);
+                    // logChannel.appendLine(`Deleted existing target file for overwrite: ${targetWorkspacePath}`);
+                }
+            } catch (accessError: any) {
+                 if (accessError.code !== 'ENOENT') throw accessError; // Re-throw other access errors
+            }
+
+            if (proceed) {
+                // Ensure target directory exists
+                const targetDir = path.dirname(targetWorkspacePath);
+                await fsPromises.mkdir(targetDir, { recursive: true });
+                logChannel.appendLine(`Ensured directory exists: ${targetDir}`);
+
+                // Perform the move (rename)
+                await fsPromises.rename(shadowUri.fsPath, targetWorkspacePath);
+                logChannel.appendLine(`File moved successfully to ${targetWorkspacePath}`);
+                vscode.window.showInformationMessage(`File moved to workspace from "${shadowSource.projectName}".`);
+
+                // Refresh the tree view
+                if (treeDataProvider) {
+                    treeDataProvider.refresh();
+                }
+            }
+        } catch (error: any) {
+            logChannel.appendLine(`Error moving file to workspace: ${error.message}`);
+            vscode.window.showErrorMessage(`Failed to move file: ${error.message}`);
+        }
+    });
+
+
+    // --- UPDATED COMMAND: Move Workspace/Shadow File to Another Shadow Project ---
+    const moveToShadow = vscode.commands.registerCommand('shadow-project.moveToShadow', async (sourceItem: vscode.TreeItem | vscode.Uri | ShadowFileItem) => {
+        logChannel.appendLine('Command: moveToShadow triggered.');
+
+        let sourceUri: vscode.Uri | undefined;
+        let sourceBasePath: string | undefined;
+        let sourceShadowProjectName: string | undefined;
+
+        const currentWorkspaceRoot = getCurrentWorkspaceRoot();
+
+        // Extract info (similar logic to updated copyToShadow)
+        if (sourceItem instanceof ShadowFileItem) {
+            sourceUri = sourceItem.resourceUri;
+            sourceBasePath = sourceItem.shadowSource.projectPath;
+            sourceShadowProjectName = sourceItem.shadowSource.projectName;
+            logChannel.appendLine(`Moving from shadow file context menu: ${sourceUri?.fsPath} (Source Project: ${sourceShadowProjectName})`);
+        } else if (sourceItem instanceof vscode.TreeItem && sourceItem.resourceUri && sourceItem.contextValue === 'workspaceFile') {
+            sourceUri = sourceItem.resourceUri;
+            sourceBasePath = currentWorkspaceRoot;
+            logChannel.appendLine(`Moving from workspace file context menu: ${sourceUri?.fsPath}`);
+        } else if (sourceItem instanceof vscode.Uri) {
+             if (currentWorkspaceRoot && sourceItem.fsPath.startsWith(currentWorkspaceRoot)) {
+                sourceUri = sourceItem;
+                sourceBasePath = currentWorkspaceRoot;
+                logChannel.appendLine(`Moving from workspace URI: ${sourceUri?.fsPath}`);
+            } else {
+                const currentProjects = getStoredProjects();
+                const foundShadow = currentProjects.find(p => sourceItem.fsPath.startsWith(p.path));
+                if (foundShadow) {
+                    sourceUri = sourceItem;
+                    sourceBasePath = foundShadow.path;
+                    sourceShadowProjectName = foundShadow.name;
+                    logChannel.appendLine(`Moving from shadow URI: ${sourceUri?.fsPath} (Source Project: ${sourceShadowProjectName})`);
+                } else {
+                    logChannel.appendLine(`URI provided is not within the workspace or any known shadow project: ${sourceItem.fsPath}`);
+                    vscode.window.showErrorMessage('Selected item is not a file within the workspace or a known shadow project.');
+                    return;
+                }
+            }
+        } else {
+            logChannel.appendLine('Move command triggered without a valid source file.');
+            vscode.window.showInformationMessage('Please right-click a file in the Shadow Projects view to move.');
+            return;
+        }
+
+        if (!sourceUri || !sourceBasePath) {
+            logChannel.appendLine('Move command missing necessary source file information (URI or BasePath).');
+            vscode.window.showErrorMessage('Could not get source file details.');
+            return;
+        }
+
+        // No longer need workspaceRoot check here
+
+        // Ensure it's a file, not a directory (for now)
+        // Ensure it's a file, not a directory (for now)
+        try {
+            const stat = await fsPromises.stat(sourceUri.fsPath);
+            if (!stat.isFile()) {
+                logChannel.appendLine(`Attempted to move a directory (not supported yet): ${sourceUri.fsPath}`);
+                vscode.window.showInformationMessage('Moving directories is not yet supported. Please select a file.');
+                return;
+            }
+        } catch (error: any) {
+             logChannel.appendLine(`Error stating file ${sourceUri.fsPath}: ${error.message}`);
+             vscode.window.showErrorMessage(`Could not access the file to move: ${error.message}`);
+             return;
+        }
+
+
+        // Calculate relative path based on the determined sourceBasePath
+        const relativePath = path.relative(sourceBasePath, sourceUri.fsPath);
+        logChannel.appendLine(`Source path: ${sourceUri.fsPath}`);
+        logChannel.appendLine(`Source base path: ${sourceBasePath}`);
+        logChannel.appendLine(`Relative path: ${relativePath}`);
+
+        const currentProjects = getStoredProjects();
+        if (currentProjects.length === 0) {
+            logChannel.appendLine('No shadow projects configured.');
+            vscode.window.showInformationMessage('No shadow projects are configured to move to.');
+            return;
+        }
+
+        // Show Quick Pick to select target shadow project, filtering out the source project if applicable
+        const targetProjects = currentProjects.filter(p => p.name !== sourceShadowProjectName);
+
+         if (targetProjects.length === 0) {
+             logChannel.appendLine('No other shadow projects available to move to.');
+             vscode.window.showInformationMessage('No other shadow projects configured to move to.');
+             return;
+        }
+
+        const items: vscode.QuickPickItem[] = targetProjects.map(proj => ({
+            label: proj.name,
+            description: proj.path,
+            detail: `Move "${path.basename(sourceUri!.fsPath)}" to this project`
+        }));
+
+        const selectedItem = await vscode.window.showQuickPick(items, {
+            placeHolder: 'Select the target shadow project',
+            title: `Move "${path.basename(sourceUri.fsPath)}" to Shadow Project`
+        });
+
+        if (selectedItem) {
+            const selectedProject = targetProjects.find(proj => proj.name === selectedItem.label); // Find within filtered list
+            if (selectedProject) {
+                const targetShadowPath = path.join(selectedProject.path, relativePath);
+                logChannel.appendLine(`User selected project "${selectedProject.name}". Target path: ${targetShadowPath}`);
+
+                try {
+                    // Check if target exists and confirm overwrite
+                    let proceed = true;
+                    try {
+                        await fsPromises.access(targetShadowPath);
+                        logChannel.appendLine(`Target file already exists: ${targetShadowPath}`);
+                        const confirmation = await vscode.window.showWarningMessage(
+                            `File already exists in shadow project "${selectedProject.name}":\n${relativePath}\n\nOverwrite?`,
+                            { modal: true },
+                            'Overwrite'
+                        );
+                        if (confirmation !== 'Overwrite') {
+                            proceed = false;
+                            logChannel.appendLine('User cancelled overwrite.');
+                        } else {
+                             // If overwriting, delete the target first (rename won't overwrite across different mount points sometimes)
+                             // Let's try without delete first.
+                            // await fsPromises.unlink(targetShadowPath);
+                            // logChannel.appendLine(`Deleted existing target file for overwrite: ${targetShadowPath}`);
+                        }
+                    } catch (accessError: any) {
+                        if (accessError.code !== 'ENOENT') throw accessError; // Re-throw other access errors
+                    }
+
+                    if (proceed) {
+                        // Ensure target directory exists
+                        const targetDir = path.dirname(targetShadowPath);
+                        await fsPromises.mkdir(targetDir, { recursive: true });
+                        logChannel.appendLine(`Ensured directory exists: ${targetDir}`);
+
+                        // Perform the move (rename)
+                        await fsPromises.rename(sourceUri.fsPath, targetShadowPath);
+                        logChannel.appendLine(`File moved successfully to ${targetShadowPath}`);
+                        vscode.window.showInformationMessage(`File moved to shadow project "${selectedProject.name}".`);
+
+                        // Refresh the tree view
+                        if (treeDataProvider) {
+                            treeDataProvider.refresh();
+                        }
+                    }
+                } catch (error: any) {
+                    logChannel.appendLine(`Error moving file to shadow project: ${error.message}`);
+                    vscode.window.showErrorMessage(`Failed to move file: ${error.message}`);
+                }
+            } else {
+                logChannel.appendLine(`Could not find selected shadow project details for label: ${selectedItem.label}`);
+                vscode.window.showErrorMessage('Could not find details for the selected shadow project.');
+            }
+        } else {
+            logChannel.appendLine('User cancelled shadow project selection for move.');
+        }
+    });
+
     // --- NEW COMMAND: Refresh View ---
     const refreshView = vscode.commands.registerCommand('shadow-project.refreshView', () => {
         logChannel.appendLine('Command: refreshView triggered.');
@@ -1542,7 +1847,9 @@ export function activate(context: vscode.ExtensionContext) {
         openShadowFileFromPath,
         copyToShadow,
         copyToWorkspace,
-        refreshView // Remove collapse command registration
+        refreshView,
+        moveToWorkspace, // Register move commands
+        moveToShadow
 );
 
     // Watch for workspace folder changes to update the tree view
