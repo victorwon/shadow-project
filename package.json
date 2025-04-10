@@ -1,0 +1,136 @@
+{
+  "name": "shadow-project",
+  "displayName": "Shadow Projects (Merged View)",
+  "publisher": "VictorWeng",
+  "description": "Merges files from multiple external 'shadow' project folders into the main explorer view.",
+  "version": "1.2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/victorwon/shadow-project.git"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:shadow-project.addShadowProject",
+    "onCommand:shadow-project.removeShadowProject",
+    "onCommand:shadow-project.renameShadowProject",
+    "onView:shadowProjectsMergedView"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "shadow-project.addShadowProject",
+        "title": "Add Shadow Project",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.removeShadowProject",
+        "title": "Remove Shadow Project",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.renameShadowProject",
+        "title": "Rename Shadow Project",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.compareWithWorkspace",
+        "title": "Compare with Workspace Copy",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.compareWithShadow",
+        "title": "Compare with Shadow Copy...",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.compareSelectedFiles",
+        "title": "Compare Selected",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.openItemInContainingProject",
+        "title": "Open Item in Containing Project",
+        "category": "Shadow Projects"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "shadowProjectsMergedView",
+          "name": "Shadow Projects (Merged)",
+          "when": "config.shadow-project.viewEnabled"
+        }
+      ]
+    },
+    "configuration": {
+       "title": "Shadow Projects",
+       "properties": {
+         "shadow-project.viewEnabled": {
+           "type": "boolean",
+           "default": true,
+           "description": "Show the merged Shadow Projects view in the Explorer."
+         }
+       }
+     },
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "shadow-project.compareWithWorkspace",
+          "when": "view == shadowProjectsMergedView && viewItem == shadowFile && shadowProject.selectionCount == 1",
+          "group": "navigation"
+        },
+        {
+          "command": "shadow-project.compareWithShadow",
+          "when": "view == shadowProjectsMergedView && viewItem == workspaceFile && shadowProject.selectionCount == 1",
+          "group": "navigation"
+        },
+        {
+          "command": "shadow-project.compareSelectedFiles",
+          "when": "view == shadowProjectsMergedView && shadowProject.selectionCount == 2",
+          "group": "5_diff@1"
+        },
+        {
+          "command": "shadow-project.openItemInContainingProject",
+          "when": "view == shadowProjectsMergedView && shadowProject.selectionCount == 1",
+          "group": "navigation@3"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test",
+    "package:vsix": "vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^8.28.0",
+    "@typescript-eslint/parser": "^8.28.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.3.2",
+    "esbuild": "^0.25.1",
+    "eslint": "^9.23.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.8.2",
+    "ignore": "^5.3.1"
+  }
+}
