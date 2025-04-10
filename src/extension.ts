@@ -1147,30 +1147,23 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
-        // Resolve the path
-        // If the path came from a link provider, it's often absolute already.
-        // If it's from word range, it might be relative.
-        let resolvedPathForSearch = potentialPath; // Use the original potential path for searching relative to shadow roots
-        let absolutePathForWorkspaceCheck = potentialPath;
-
-        if (!path.isAbsolute(potentialPath)) {
-            if (currentWorkspaceRoot) {
-                absolutePathForWorkspaceCheck = path.resolve(currentWorkspaceRoot, potentialPath);
-                logChannel.appendLine(`Resolved relative path for workspace check to: ${absolutePathForWorkspaceCheck}`);
-                // Keep resolvedPathForSearch as the original relative path for shadow project checks
-            } else {
-                 logChannel.appendLine(`Cannot resolve relative path without workspace root: ${potentialPath}`);
-                 vscode.window.showWarningMessage('Shadow Project: Cannot resolve relative path without an open workspace folder.');
-                 return;
-            }
+        // Determine the path to use for searching
+        let searchPath = potentialPath;
+        // If the path starts with '/' AND it didn't come from a link provider (which might be a valid absolute URI)
+        // treat it as relative-from-root by stripping the leading '/'.
+        if (potentialPath.startsWith('/') && !isLinkPath) {
+            searchPath = potentialPath.substring(1);
+            logChannel.appendLine(`Path started with '/'; treating as relative to project roots: ${searchPath}`);
+        } else if (potentialPath.startsWith('/') && isLinkPath) {
+             logChannel.appendLine(`Path from link provider starts with '/'; treating as absolute: ${potentialPath}`);
+             // Keep searchPath as potentialPath for absolute check
         } else {
-             // If it's absolute, use it directly for workspace check
-             absolutePathForWorkspaceCheck = potentialPath;
-             // For shadow project search, we still need the original form if it was intended relative
-             // However, if it came from a link, it's likely absolute and intended as such.
-             // If it came from word range and is absolute, treat it as absolute everywhere.
-             // This logic assumes absolute paths found in text refer to the system root, not a shadow root.
+             logChannel.appendLine(`Path does not start with '/'; treating as relative or absolute: ${potentialPath}`);
+             // Keep searchPath as potentialPath for relative/absolute check
         }
+
+        // We no longer need separate absolutePathForWorkspaceCheck logic,
+        // as findAndOpenFile uses path.resolve which handles both absolute and relative searchPath inputs correctly.
 
 
         // Get current state for searching
@@ -1187,7 +1180,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // Search and open using the helper function
-        const findResult = await findAndOpenFile(resolvedPathForSearch, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
+        const findResult = await findAndOpenFile(searchPath, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
 
         if (findResult) {
             // File opened successfully, now reveal it in the tree view
@@ -1210,7 +1203,8 @@ export function activate(context: vscode.ExtensionContext) {
 
                     if (itemToReveal) {
                         logChannel.appendLine(`Revealing opened file in tree view: ${findResult.uri.fsPath}`);
-                        await shadowTreeView.reveal(itemToReveal, { select: true, focus: true, expand: true });
+                        // Simplify options: select the item, but don't force focus or expansion initially
+                        await shadowTreeView.reveal(itemToReveal, { select: true, focus: false, expand: false });
                     } else {
                          logChannel.appendLine(`Could not construct TreeItem for reveal: ${findResult.uri.fsPath}`);
                     }
@@ -1224,6 +1218,8 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } else {
             // File not found or couldn't be opened
+            // Use the original potentialPath for the message
+            // Use the original potentialPath for the message
             vscode.window.showInformationMessage(`Shadow Project: Could not find '${potentialPath}' in workspace or shadow projects.`);
         }
     });
