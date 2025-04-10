@@ -57,6 +57,11 @@
         "command": "shadow-project.openItemInContainingProject",
         "title": "Open Item in Containing Project",
         "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.openShadowFileFromPath",
+        "title": "Open Shadow File from Path under Cursor",
+        "category": "Shadow Projects"
       }
     ],
     "views": {
@@ -101,7 +106,22 @@
           "group": "navigation@3"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "shadow-project.openShadowFileFromPath",
+        "key": "cmd+r",
+        "mac": "cmd+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "shadow-project.openShadowFileFromPath",
+        "key": "ctrl+r",
+        "win": "ctrl+r",
+        "linux": "ctrl+r",
+        "when": "editorTextFocus"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

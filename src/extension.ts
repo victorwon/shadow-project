@@ -392,6 +392,73 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
     }
 }
 
+// Helper function to check if a path exists and is a file
+async function fileExists(filePath: string): Promise<boolean> {
+    try {
+        const stat = await fs.promises.stat(filePath);
+        return stat.isFile();
+    } catch (error: any) {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+            return false; // Doesn't exist or isn't a file
+        }
+        logChannel.appendLine(`Error checking file existence for ${filePath}: ${error.message}`);
+        return false; // Other error
+    }
+}
+
+// Helper function to find and open the first valid file match
+async function findAndOpenFile(
+    potentialPath: string,
+    workspaceRoot: string | undefined,
+    shadowProjects: ShadowProject[],
+    workspaceIg: Ignore | undefined,
+    shadowIgs: Map<string, Ignore>
+): Promise<boolean> {
+    logChannel.appendLine(`Attempting to find and open path: ${potentialPath}`);
+
+    // 1. Check Workspace
+    if (workspaceRoot) {
+        // Resolve relative to workspace root IF the potential path is relative
+        // If potentialPath is absolute, resolve will just return it.
+        // If potentialPath is relative, it resolves relative to workspaceRoot.
+        const workspaceFilePath = path.resolve(workspaceRoot, potentialPath);
+        const relativeWorkspacePath = path.relative(workspaceRoot, workspaceFilePath);
+        const workspacePathToCheck = relativeWorkspacePath; // For ignore check
+
+        logChannel.appendLine(`Checking workspace: ${workspaceFilePath} (relative: ${relativeWorkspacePath})`);
+
+        // Check ignore using the path relative to the workspace root
+        if (!workspaceIg?.ignores(workspacePathToCheck) && await fileExists(workspaceFilePath)) {
+            logChannel.appendLine(`Found in workspace: ${workspaceFilePath}`);
+            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(workspaceFilePath));
+            return true;
+        }
+    }
+
+    // 2. Check Shadow Projects
+    for (const proj of shadowProjects) {
+        // Resolve relative to shadow project root IF the potential path is relative
+        // If potentialPath is absolute, resolve will just return it.
+        // If potentialPath is relative, it resolves relative to proj.path.
+        const shadowFilePath = path.resolve(proj.path, potentialPath);
+        const relativeShadowPath = path.relative(proj.path, shadowFilePath);
+        const shadowPathToCheck = relativeShadowPath; // For ignore check
+        const ig = shadowIgs.get(proj.path);
+
+        logChannel.appendLine(`Checking shadow project '${proj.name}': ${shadowFilePath} (relative: ${relativeShadowPath})`);
+
+        // Check ignore using the path relative to the shadow project root
+        if (!ig?.ignores(shadowPathToCheck) && await fileExists(shadowFilePath)) {
+            logChannel.appendLine(`Found in shadow project '${proj.name}': ${shadowFilePath}`);
+            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(shadowFilePath));
+            return true;
+        }
+    }
+
+    logChannel.appendLine(`Path not found in workspace or any shadow projects: ${potentialPath}`);
+    return false;
+}
+
 
 // --- Extension Activation ---
 export function activate(context: vscode.ExtensionContext) {
@@ -932,6 +999,129 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // --- NEW COMMAND: Open Shadow File from Path ---
+    const openShadowFileFromPath = vscode.commands.registerCommand('shadow-project.openShadowFileFromPath', async () => {
+        logChannel.appendLine('Command: openShadowFileFromPath triggered.');
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            logChannel.appendLine('No active text editor.');
+            return;
+        }
+
+        const document = editor.document;
+        const position = editor.selection.active;
+        const currentWorkspaceRoot = getCurrentWorkspaceRoot(); // Use existing helper
+
+        let potentialPath: string | undefined;
+        let isLinkPath = false; // Flag to know if path came from link provider
+
+        // Try using link provider first
+        try {
+            const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+                'vscode.executeLinkProvider',
+                document.uri,
+                // Add a cancellation token in case it takes too long
+                new vscode.CancellationTokenSource().token
+            );
+            // Find the most specific link containing the position
+            const linkAtPosition = links
+                .filter(link => link.range.contains(position))
+                .sort((a, b) => {
+                    // Sort by range length (smaller range is more specific)
+                    const lengthA = document.offsetAt(a.range.end) - document.offsetAt(a.range.start);
+                    const lengthB = document.offsetAt(b.range.end) - document.offsetAt(b.range.start);
+                    return lengthA - lengthB;
+                })[0]; // Get the first one (most specific)
+
+            if (linkAtPosition?.target) {
+                // Link targets can be URIs or strings. Handle URI case.
+                if (linkAtPosition.target instanceof vscode.Uri) {
+                    potentialPath = linkAtPosition.target.fsPath;
+                } else if (typeof linkAtPosition.target === 'string') {
+                     // If it's a string, it might be a relative path or something else
+                     // We'll treat it as a potential path string for now
+                     potentialPath = linkAtPosition.target;
+                }
+                if (potentialPath) {
+                    isLinkPath = true;
+                    logChannel.appendLine(`Found path via link provider: ${potentialPath}`);
+                }
+            }
+        } catch (err) {
+            // Log but don't fail, fallback will handle it
+            logChannel.appendLine(`Error executing link provider: ${err}`);
+        }
+
+        // Fallback: Get text around cursor if no link found
+        if (!potentialPath) {
+            // Regex to capture typical file paths (including relative ./ ../ and spaces if quoted)
+            // This is a basic attempt and might need refinement
+            const pathRegex = /(['"])([^'"]+\.\w+)\1|([\w\/\.\-\_]+(?:\.[\w]+))|(\.\.?\/[\w\/\.\-\_]+)/;
+            const wordRange = document.getWordRangeAtPosition(position, pathRegex);
+            if (wordRange) {
+                potentialPath = document.getText(wordRange);
+                // Basic cleanup (remove surrounding quotes)
+                potentialPath = potentialPath.replace(/^['"]|['"]$/g, '');
+                logChannel.appendLine(`Found potential path via word range: ${potentialPath}`);
+            }
+        }
+
+        if (!potentialPath) {
+            logChannel.appendLine('No potential path found at cursor.');
+            vscode.window.showInformationMessage('Shadow Project: No file path found at cursor.');
+            return;
+        }
+
+        // Resolve the path
+        // If the path came from a link provider, it's often absolute already.
+        // If it's from word range, it might be relative.
+        let resolvedPathForSearch = potentialPath; // Use the original potential path for searching relative to shadow roots
+        let absolutePathForWorkspaceCheck = potentialPath;
+
+        if (!path.isAbsolute(potentialPath)) {
+            if (currentWorkspaceRoot) {
+                absolutePathForWorkspaceCheck = path.resolve(currentWorkspaceRoot, potentialPath);
+                logChannel.appendLine(`Resolved relative path for workspace check to: ${absolutePathForWorkspaceCheck}`);
+                // Keep resolvedPathForSearch as the original relative path for shadow project checks
+            } else {
+                 logChannel.appendLine(`Cannot resolve relative path without workspace root: ${potentialPath}`);
+                 vscode.window.showWarningMessage('Shadow Project: Cannot resolve relative path without an open workspace folder.');
+                 return;
+            }
+        } else {
+             // If it's absolute, use it directly for workspace check
+             absolutePathForWorkspaceCheck = potentialPath;
+             // For shadow project search, we still need the original form if it was intended relative
+             // However, if it came from a link, it's likely absolute and intended as such.
+             // If it came from word range and is absolute, treat it as absolute everywhere.
+             // This logic assumes absolute paths found in text refer to the system root, not a shadow root.
+        }
+
+
+        // Get current state for searching
+        const currentProjects = getStoredProjects();
+        // Access ignore instances safely from the treeDataProvider
+        // Need to cast to 'any' temporarily to access private members, or add public getters to the class
+        const workspaceIg = treeDataProvider ? (treeDataProvider as any).workspaceIg : undefined;
+        const shadowIgs = treeDataProvider ? (treeDataProvider as any).shadowIgs : new Map<string, Ignore>();
+
+        if (!treeDataProvider) {
+             logChannel.appendLine('TreeDataProvider not available for ignore rules.');
+             vscode.window.showWarningMessage('Shadow Project: View not fully initialized. Cannot check ignore rules.');
+             return; // Safer to just return if ignores aren't ready
+        }
+
+        // Search and open using the helper function
+        // Pass the original potentialPath for relative resolution within shadow projects
+        // Use absolutePathForWorkspaceCheck for workspace check, resolvedPathForSearch for shadow checks
+        const opened = await findAndOpenFile(resolvedPathForSearch, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
+
+
+        if (!opened) {
+            vscode.window.showInformationMessage(`Shadow Project: Could not find '${potentialPath}' in workspace or shadow projects.`);
+        }
+    });
+
     context.subscriptions.push(
         addShadowProject,
         removeShadowProject,
@@ -939,7 +1129,8 @@ export function activate(context: vscode.ExtensionContext) {
         compareWithWorkspace,
         compareWithShadow,
         compareSelectedFiles,
-        openItemInContainingProjectCommand // Register the correctly named command
+        openItemInContainingProjectCommand, // Register the correctly named command
+        openShadowFileFromPath // Add the new command here
     );
 
     // Watch for workspace folder changes to update the tree view
