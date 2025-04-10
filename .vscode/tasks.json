@@ -1,52 +1,41 @@
-// See https://go.microsoft.com/fwlink/?LinkId=733558
-// for the documentation about the tasks.json format
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-      "label": "watch",
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build & Install Extension",
+      "type": "shell",
+      // Use 'dependsOrder' to run tasks sequentially
+      "dependsOrder": "sequence",
+      // Define the individual steps as separate dependent tasks
       "dependsOn": [
-          "npm: watch:tsc",
-          "npm: watch:esbuild"
+        "Run Tests",
+        "Package Extension",
+        "Install Extension"
       ],
-      "presentation": {
-          "reveal": "never"
-      },
+      "problemMatcher": [],
+      // Mark this as the default build task
       "group": {
-          "kind": "build",
-          "isDefault": true
+        "kind": "build",
+        "isDefault": true
       }
     },
     {
-      "type": "npm",
-      "script": "watch:tsc",
-      "group": "build",
-      "problemMatcher": "$tsc-watch",
-      "isBackground": true,
-      "label": "npm: watch:tsc",
-      "presentation": {
-          "group": "watch",
-          "reveal": "never"
-      }
+      "label": "Run Tests",
+      "type": "shell",
+      "command": "npm run test",
+      "problemMatcher": []
     },
-		{
-			"type": "npm",
-			"script": "watch-tests",
-			"problemMatcher": "$tsc-watch",
-			"isBackground": true,
-			"presentation": {
-				"reveal": "never",
-				"group": "watchers"
-			},
-			"group": "build"
-		},
-		{
-			"label": "tasks: watch-tests",
-			"dependsOn": [
-				"npm: watch",
-				"npm: watch-tests"
-			],
-			"problemMatcher": []
-		}
-	]
+    {
+      "label": "Package Extension",
+      "type": "shell",
+      "command": "npx vsce package --allow-missing-repository",
+      "problemMatcher": []
+    },
+    {
+      "label": "Install Extension",
+      "type": "shell",
+      "command": "code --install-extension ./shadow-project-$(node -p \"require('./package.json').version\").vsix --force",
+      "problemMatcher": []
+    }
+  ]
 }
