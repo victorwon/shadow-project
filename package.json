@@ -4,6 +4,7 @@
   "publisher": "VictorWeng",
   "description": "Merges files from multiple external 'shadow' project folders into the main explorer view.",
   "version": "1.4.0",
+  "icon": "images/logo.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/victorwon/shadow-project.git"
