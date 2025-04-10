@@ -261,7 +261,10 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
                 // Create a single MergedDirectoryItem representing all source directories
                 const allDirPaths = itemInfo.directoryPaths;
                 if (allDirPaths.length > 0) {
-                     finalTreeItems.push(new MergedDirectoryItem(itemName, allDirPaths));
+                     const newItem = new MergedDirectoryItem(itemName, allDirPaths);
+                     // Explicitly ensure it's collapsed when created/refreshed
+                     newItem.collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
+                     finalTreeItems.push(newItem);
                 }
             } else if (itemType === vscode.FileType.File) {
                 // Handle file merging/display logic
@@ -556,50 +559,84 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     let treeDataProvider: MergedProjectsTreeDataProvider | undefined;
-    let shadowTreeView: vscode.TreeView<vscode.TreeItem> | undefined; // Store the TreeView instance
-    // Define view ID before the function that uses it
-    const treeViewId = 'shadowProjectsMergedView'; // ID for the merged view in explorer
-
+    let shadowTreeView: vscode.TreeView<vscode.TreeItem> | undefined;
+    let viewDisposable: vscode.Disposable | undefined; // Store view disposable
+    let selectionDisposable: vscode.Disposable | undefined; // Store selection listener disposable
+    const treeViewId = 'shadowProjectsMergedView';
     const initializeOrUpdateTreeView = () => {
         currentShadowProjects = getStoredProjects();
         const currentWorkspaceRoot = getCurrentWorkspaceRoot();
 
-        if (currentWorkspaceRoot || currentShadowProjects.length > 0) {
-            if (treeDataProvider) {
-                logChannel.appendLine('Updating existing merged tree view provider.');
-                treeDataProvider.updateWorkspaceRoot(currentWorkspaceRoot); // Update root if changed
-                treeDataProvider.updateShadowProjects(currentShadowProjects);
-            } else {
-                logChannel.appendLine('Registering new merged tree view provider.');
+        // Determine if view should be active
+        const shouldBeActive = !!(currentWorkspaceRoot || currentShadowProjects.length > 0);
+
+        if (shouldBeActive) {
+            // --- Ensure Provider ---
+            if (!treeDataProvider) {
+                logChannel.appendLine('Creating new merged tree view provider.');
                 treeDataProvider = new MergedProjectsTreeDataProvider(currentWorkspaceRoot, currentShadowProjects);
-                // Create the TreeView with multi-select enabled
-                shadowTreeView = vscode.window.createTreeView(treeViewId, { // Assign to stored variable
-                    treeDataProvider: treeDataProvider,
-                    canSelectMany: true // Enable multi-select
-                });
-                context.subscriptions.push(shadowTreeView); // Add the TreeView to subscriptions
-
-                // Add the selection change listener to set context
-                context.subscriptions.push(shadowTreeView.onDidChangeSelection(e => {
-                    const selectionCount = e.selection.length;
-                    logChannel.appendLine(`Selection changed. Count: ${selectionCount}`);
-                    vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', selectionCount);
-                }));
-
-                // Initial context setting
-                vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
+            } else {
+                 logChannel.appendLine('Updating existing merged tree view provider.');
+                 treeDataProvider.updateWorkspaceRoot(currentWorkspaceRoot);
+                 treeDataProvider.updateShadowProjects(currentShadowProjects);
             }
+
+            // --- Dispose Old View/Listeners (if they exist) ---
+            // Simplify disposal: just call dispose(), don't remove from context.subscriptions here.
+            if (selectionDisposable) {
+                selectionDisposable.dispose();
+                selectionDisposable = undefined;
+                logChannel.appendLine('Disposed previous selection listener.');
+            }
+            if (viewDisposable) {
+                viewDisposable.dispose(); // Dispose the TreeView itself
+                viewDisposable = undefined;
+                shadowTreeView = undefined; // Clear the reference
+                logChannel.appendLine('Disposed previous TreeView instance.');
+            }
+            // Note: Disposed items might remain in context.subscriptions, but VS Code should handle this.
+
+            // --- Create New View/Listeners ---
+            logChannel.appendLine('Creating new TreeView instance.');
+            shadowTreeView = vscode.window.createTreeView(treeViewId, {
+                treeDataProvider: treeDataProvider, // Use the existing/updated provider
+                canSelectMany: true
+            });
+            viewDisposable = shadowTreeView; // Store the new disposable
+            context.subscriptions.push(viewDisposable); // Add to main subscriptions
+
+            selectionDisposable = shadowTreeView.onDidChangeSelection(e => {
+               const selectionCount = e.selection.length;
+               logChannel.appendLine(`Selection changed. Count: ${selectionCount}`);
+               vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', selectionCount);
+            });
+            context.subscriptions.push(selectionDisposable); // Add listener disposable too
+
+            // Initial context setting
+            vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
+
         } else {
-            logChannel.appendLine('No workspace or shadow projects; merged view provider not registered/updated.');
-            // If provider exists, maybe clear it? Or let VS Code handle empty view.
-            // For now, just ensure it's not created/updated if nothing to show.
+            // --- View should NOT be active: Clean up everything ---
+            logChannel.appendLine('No workspace or shadow projects; ensuring view and provider are cleaned up.');
+            if (selectionDisposable) {
+                const selIdx = context.subscriptions.indexOf(selectionDisposable);
+                if (selIdx > -1) context.subscriptions.splice(selIdx, 1);
+                selectionDisposable.dispose();
+                selectionDisposable = undefined;
+            }
+            if (viewDisposable) {
+                const viewIdx = context.subscriptions.indexOf(viewDisposable);
+                if (viewIdx > -1) context.subscriptions.splice(viewIdx, 1);
+                viewDisposable.dispose();
+                viewDisposable = undefined;
+                shadowTreeView = undefined;
+            }
+            // We can keep the provider instance but clear its data
             if (treeDataProvider) {
-                // How to properly unregister or clear? For now, refresh might show empty.
                 treeDataProvider.updateWorkspaceRoot(undefined);
                 treeDataProvider.updateShadowProjects([]);
-                // Reset selection count context if view becomes empty/disabled
-                vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
             }
+            vscode.commands.executeCommand('setContext', 'shadowProject.selectionCount', 0);
         }
     };
 
@@ -1492,6 +1529,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+
+
     context.subscriptions.push(
         addShadowProject,
         removeShadowProject,
@@ -1503,8 +1542,8 @@ export function activate(context: vscode.ExtensionContext) {
         openShadowFileFromPath,
         copyToShadow,
         copyToWorkspace,
-        refreshView // Register the refresh command
-    );
+        refreshView // Remove collapse command registration
+);
 
     // Watch for workspace folder changes to update the tree view
     context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {

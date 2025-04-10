@@ -26,12 +26,14 @@
       {
         "command": "shadow-project.addShadowProject",
         "title": "Add Shadow Project",
-        "category": "Shadow Projects"
+        "category": "Shadow Projects",
+        "icon": "$(add)"
       },
       {
         "command": "shadow-project.removeShadowProject",
         "title": "Remove Shadow Project",
-        "category": "Shadow Projects"
+        "category": "Shadow Projects",
+        "icon": "$(remove)"
       },
       {
         "command": "shadow-project.renameShadowProject",
@@ -142,6 +144,16 @@
           "command": "shadow-project.refreshView",
           "when": "view == shadowProjectsMergedView",
           "group": "navigation@1"
+        },
+        {
+          "command": "shadow-project.addShadowProject",
+          "when": "view == shadowProjectsMergedView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "shadow-project.removeShadowProject",
+          "when": "view == shadowProjectsMergedView",
+          "group": "navigation@3"
         }
       ]
     },
