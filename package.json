@@ -3,7 +3,7 @@
   "displayName": "Shadow Projects (Merged View)",
   "publisher": "VictorWeng",
   "description": "Merges files from multiple external 'shadow' project folders into the main explorer view.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/victorwon/shadow-project.git"

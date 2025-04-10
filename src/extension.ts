@@ -399,8 +399,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // --- State Management ---
     const SHADOW_PROJECTS_KEY = 'shadowProjects';
-    const getStoredProjects = (): ShadowProject[] => context.globalState.get<ShadowProject[]>(SHADOW_PROJECTS_KEY, []);
-    const updateStoredProjects = (projects: ShadowProject[]): Thenable<void> => context.globalState.update(SHADOW_PROJECTS_KEY, projects);
+    const getStoredProjects = (): ShadowProject[] => context.workspaceState.get<ShadowProject[]>(SHADOW_PROJECTS_KEY, []);
+    const updateStoredProjects = (projects: ShadowProject[]): Thenable<void> => context.workspaceState.update(SHADOW_PROJECTS_KEY, projects);
 
     let currentShadowProjects = getStoredProjects();
     logChannel.appendLine(`Loaded ${currentShadowProjects.length} shadow projects from state.`);
