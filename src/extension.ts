@@ -390,6 +390,65 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
         }
         return ignore(); // Return empty ignore instance if file not found or error
     }
+
+    // --- NEW: Get Parent Implementation (Required for reveal) ---
+    getParent(element: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem> {
+        logChannel.appendLine(`getParent called for element: ${element.label}`);
+
+        // We need the URI of the element to find its parent path
+        let elementUri = element.resourceUri;
+
+        // Handle cases where resourceUri might not be directly on the element
+        // (e.g., if VS Code passes a generic TreeItem during reveal traversal)
+        if (!elementUri && element instanceof ShadowFileItem) {
+            elementUri = vscode.Uri.file(element.shadowSource.fullPath);
+        } else if (!elementUri && element instanceof MergedDirectoryItem && element.sourceDirectoryPaths.length > 0) {
+             // Use the first source path as representative for merged directories
+             elementUri = vscode.Uri.file(element.sourceDirectoryPaths[0]);
+        }
+
+        if (!elementUri) {
+            logChannel.appendLine(`getParent: Could not determine URI for element ${element.label}. Returning undefined.`);
+            return undefined; // Cannot determine parent without a URI
+        }
+
+        const elementPath = elementUri.fsPath;
+        const parentPath = path.dirname(elementPath);
+        logChannel.appendLine(`getParent: Element path: ${elementPath}, Parent path: ${parentPath}`);
+
+        // Check if the parent path is one of the roots (workspace or shadow project root)
+        if (this.workspaceRoot && parentPath === this.workspaceRoot) {
+            logChannel.appendLine(`getParent: Parent is workspace root. Returning undefined.`);
+            return undefined;
+        }
+        const isShadowRoot = this.shadowProjects.some(p => p.path === parentPath);
+        if (isShadowRoot) {
+            logChannel.appendLine(`getParent: Parent is a shadow project root. Returning undefined.`);
+            return undefined;
+        }
+
+        // If the parent path is the root of the filesystem, return undefined
+        if (parentPath === path.dirname(parentPath)) {
+             logChannel.appendLine(`getParent: Parent is filesystem root. Returning undefined.`);
+             return undefined;
+        }
+
+        // If we reach here, the parent is a directory within the workspace or a shadow project.
+        // We need to return a TreeItem representing this parent directory.
+        // Constructing the *exact* MergedDirectoryItem with all its sources is complex here.
+        // Instead, we return a placeholder TreeItem with the correct URI and label.
+        // VS Code will call getChildren on this item if it needs to expand it further.
+        const parentDirName = path.basename(parentPath);
+        const parentUri = vscode.Uri.file(parentPath);
+        logChannel.appendLine(`getParent: Constructing placeholder parent TreeItem for ${parentDirName} at ${parentUri.fsPath}`);
+
+        const parentItem = new vscode.TreeItem(parentDirName, vscode.TreeItemCollapsibleState.Collapsed);
+        parentItem.resourceUri = parentUri;
+        // We don't know the exact contextValue ('mergedDirectory' or simple dir) here,
+        // but this might be sufficient for reveal to traverse upwards.
+
+        return parentItem;
+    }
 }
 
 // Helper function to check if a path exists and is a file
@@ -406,6 +465,13 @@ async function fileExists(filePath: string): Promise<boolean> {
     }
 }
 
+// Interface for the result of finding a file
+interface FoundFileInfo {
+    uri: vscode.Uri;
+    type: 'workspace' | 'shadow';
+    shadowSource?: MergedItemSource; // Only present if type is 'shadow'
+}
+
 // Helper function to find and open the first valid file match
 async function findAndOpenFile(
     potentialPath: string,
@@ -413,7 +479,7 @@ async function findAndOpenFile(
     shadowProjects: ShadowProject[],
     workspaceIg: Ignore | undefined,
     shadowIgs: Map<string, Ignore>
-): Promise<boolean> {
+): Promise<FoundFileInfo | undefined> { // Return FoundFileInfo or undefined
     logChannel.appendLine(`Attempting to find and open path: ${potentialPath}`);
 
     // 1. Check Workspace
@@ -430,8 +496,9 @@ async function findAndOpenFile(
         // Check ignore using the path relative to the workspace root
         if (!workspaceIg?.ignores(workspacePathToCheck) && await fileExists(workspaceFilePath)) {
             logChannel.appendLine(`Found in workspace: ${workspaceFilePath}`);
-            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(workspaceFilePath));
-            return true;
+            const fileUri = vscode.Uri.file(workspaceFilePath);
+            await vscode.commands.executeCommand('vscode.open', fileUri);
+            return { uri: fileUri, type: 'workspace' }; // Return FoundFileInfo
         }
     }
 
@@ -450,13 +517,21 @@ async function findAndOpenFile(
         // Check ignore using the path relative to the shadow project root
         if (!ig?.ignores(shadowPathToCheck) && await fileExists(shadowFilePath)) {
             logChannel.appendLine(`Found in shadow project '${proj.name}': ${shadowFilePath}`);
-            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(shadowFilePath));
-            return true;
+            const fileUri = vscode.Uri.file(shadowFilePath);
+            await vscode.commands.executeCommand('vscode.open', fileUri);
+             // Construct the MergedItemSource for the shadow file
+             const shadowSource: MergedItemSource = {
+                projectName: proj.name,
+                projectPath: proj.path,
+                fullPath: shadowFilePath,
+                fileType: vscode.FileType.File // Assume file since fileExists passed
+            };
+            return { uri: fileUri, type: 'shadow', shadowSource: shadowSource }; // Return FoundFileInfo
         }
     }
 
     logChannel.appendLine(`Path not found in workspace or any shadow projects: ${potentialPath}`);
-    return false;
+    return undefined; // Return undefined if not found
 }
 
 
@@ -1112,12 +1187,43 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // Search and open using the helper function
-        // Pass the original potentialPath for relative resolution within shadow projects
-        // Use absolutePathForWorkspaceCheck for workspace check, resolvedPathForSearch for shadow checks
-        const opened = await findAndOpenFile(resolvedPathForSearch, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
+        const findResult = await findAndOpenFile(resolvedPathForSearch, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
 
+        if (findResult) {
+            // File opened successfully, now reveal it in the tree view
+            if (shadowTreeView) {
+                try {
+                    let itemToReveal: vscode.TreeItem | undefined;
+                    const itemName = path.basename(findResult.uri.fsPath);
 
-        if (!opened) {
+                    if (findResult.type === 'workspace') {
+                        // Construct a basic TreeItem for workspace files matching how getChildren creates them
+                        itemToReveal = new vscode.TreeItem(itemName, vscode.TreeItemCollapsibleState.None);
+                        itemToReveal.resourceUri = findResult.uri;
+                        itemToReveal.contextValue = 'workspaceFile'; // Match context value
+                        itemToReveal.command = { command: 'vscode.open', title: "Open File", arguments: [findResult.uri] }; // Add command
+                    } else if (findResult.type === 'shadow' && findResult.shadowSource) {
+                        // Construct the specific ShadowFileItem
+                        itemToReveal = new ShadowFileItem(itemName, findResult.shadowSource);
+                        // ShadowFileItem constructor sets resourceUri, description, contextValue, command
+                    }
+
+                    if (itemToReveal) {
+                        logChannel.appendLine(`Revealing opened file in tree view: ${findResult.uri.fsPath}`);
+                        await shadowTreeView.reveal(itemToReveal, { select: true, focus: true, expand: true });
+                    } else {
+                         logChannel.appendLine(`Could not construct TreeItem for reveal: ${findResult.uri.fsPath}`);
+                    }
+
+                } catch (revealError: any) {
+                    logChannel.appendLine(`Error revealing item in tree view: ${revealError.message}`);
+                    // Don't bother the user, just log it.
+                }
+            } else {
+                logChannel.appendLine('Shadow tree view not available to reveal item.');
+            }
+        } else {
+            // File not found or couldn't be opened
             vscode.window.showInformationMessage(`Shadow Project: Could not find '${potentialPath}' in workspace or shadow projects.`);
         }
     });
