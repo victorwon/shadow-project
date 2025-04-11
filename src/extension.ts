@@ -336,10 +336,13 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
     private async readDirectory(dirPath: string): Promise<[string, vscode.FileType][]> {
         try {
             // Check if path exists before reading
-            if (!await this.pathExists(dirPath)) {
+            if (!await this.pathExists(dirPath)) { // Uses fs.promises.access
+                logChannel.appendLine(`readDirectory: Path does not exist or no access: ${dirPath}`); // Added log
                 return [];
             }
+            logChannel.appendLine(`readDirectory: Reading directory: ${dirPath}`); // Added log
             const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+            logChannel.appendLine(`readDirectory: Found ${entries.length} entries in: ${dirPath}`); // Added log
             return entries.map(entry => {
                 let type = vscode.FileType.Unknown;
                 if (entry.isFile()) type = vscode.FileType.File;
@@ -351,10 +354,12 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
             // Log errors other than ENOENT (file not found), re-throw others?
             if (error.code !== 'ENOENT') {
                  logChannel.appendLine(`Failed to read directory ${dirPath}: ${error.message}`);
-            }
-            // Propagate error to be handled by the caller, or return empty?
-            // Returning empty might be safer for merging.
-            return [];
+           } else {
+                logChannel.appendLine(`readDirectory: Path ENOENT (likely okay if transient): ${dirPath}`); // Added log
+           }
+           // Propagate error to be handled by the caller, or return empty?
+           // Returning empty might be safer for merging.
+           return [];
             // throw error;
         }
     }
@@ -363,7 +368,8 @@ class MergedProjectsTreeDataProvider implements vscode.TreeDataProvider<vscode.T
         try {
             await fs.promises.access(p);
             return true;
-        } catch {
+        } catch (error: any) { // Added error logging
+            logChannel.appendLine(`pathExists check failed for ${p}: ${error.message}`);
             return false;
         }
     }
@@ -552,9 +558,9 @@ export function activate(context: vscode.ExtensionContext) {
     logChannel.appendLine('ShadowProject extension activating (merged view)...');
 
     // --- State Management ---
-    const SHADOW_PROJECTS_KEY = 'shadowProjects';
-    const getStoredProjects = (): ShadowProject[] => context.workspaceState.get<ShadowProject[]>(SHADOW_PROJECTS_KEY, []);
-    const updateStoredProjects = (projects: ShadowProject[]): Thenable<void> => context.workspaceState.update(SHADOW_PROJECTS_KEY, projects);
+    const SHADOW_PROJECTS_KEY = 'shadowProjectsGlobal'; // Use a distinct key for global state
+    const getStoredProjects = (): ShadowProject[] => context.globalState.get<ShadowProject[]>(SHADOW_PROJECTS_KEY, []); // Use globalState
+    const updateStoredProjects = (projects: ShadowProject[]): Thenable<void> => context.globalState.update(SHADOW_PROJECTS_KEY, projects); // Use globalState
 
     let currentShadowProjects = getStoredProjects();
     logChannel.appendLine(`Loaded ${currentShadowProjects.length} shadow projects from state.`);
@@ -593,6 +599,95 @@ export function activate(context: vscode.ExtensionContext) {
     logChannel.appendLine('Provider and View created and registered.');
 
     // Removed initializeOrUpdateTreeView function and its initial call
+
+    // --- File System Watcher Setup ---
+    let fileSystemWatchers: vscode.FileSystemWatcher[] = [];
+
+    function setupFileSystemWatchers() {
+        // Dispose existing watchers
+        logChannel.appendLine('Disposing existing file system watchers...');
+        fileSystemWatchers.forEach(watcher => watcher.dispose());
+        fileSystemWatchers = []; // Clear the array
+
+        const workspaceRoot = getCurrentWorkspaceRoot();
+        const projectsToWatch = currentShadowProjects; // Use the up-to-date list
+
+        // Watch Workspace Root
+        if (workspaceRoot && fs.existsSync(workspaceRoot)) { // Check existence
+            logChannel.appendLine(`Setting up watcher for workspace root: ${workspaceRoot}`);
+            try {
+                const workspaceWatcher = vscode.workspace.createFileSystemWatcher(
+                    new vscode.RelativePattern(vscode.Uri.file(workspaceRoot), '**/*'),
+                    false, // ignoreCreateEvents - no
+                    false, // ignoreChangeEvents - no
+                    false  // ignoreDeleteEvents - no
+                );
+                workspaceWatcher.onDidCreate(uri => {
+                    // Basic check to avoid excessive refreshes from internal vscode/git operations if possible
+                    if (uri.fsPath.includes('.git/')) return;
+                    logChannel.appendLine(`Workspace file created: ${uri.fsPath}. Refreshing view.`);
+                    treeDataProvider.refresh();
+                });
+                workspaceWatcher.onDidChange(uri => {
+                    if (uri.fsPath.includes('.git/')) return;
+                    // Change events can fire for directory renames too.
+                    logChannel.appendLine(`Workspace file changed: ${uri.fsPath}. Refreshing view.`);
+                    treeDataProvider.refresh();
+                });
+                workspaceWatcher.onDidDelete(uri => {
+                    if (uri.fsPath.includes('.git/')) return;
+                    logChannel.appendLine(`Workspace file deleted: ${uri.fsPath}. Refreshing view.`);
+                    treeDataProvider.refresh();
+                });
+                context.subscriptions.push(workspaceWatcher); // Add to subscriptions for automatic disposal on deactivate
+                fileSystemWatchers.push(workspaceWatcher); // Keep track for manual disposal
+            } catch (error: any) {
+                 logChannel.appendLine(`Error creating workspace watcher for ${workspaceRoot}: ${error.message}`);
+            }
+        } else if (workspaceRoot) {
+             logChannel.appendLine(`Skipping watcher setup for non-existent workspace root: ${workspaceRoot}`);
+        }
+
+
+        // Watch Shadow Project Roots
+        projectsToWatch.forEach(proj => {
+             if (fs.existsSync(proj.path)) { // Check existence before watching
+                logChannel.appendLine(`Setting up watcher for shadow project: ${proj.name} at ${proj.path}`);
+                 try {
+                    const shadowWatcher = vscode.workspace.createFileSystemWatcher(
+                        new vscode.RelativePattern(vscode.Uri.file(proj.path), '**/*'),
+                        false, false, false
+                    );
+                    shadowWatcher.onDidCreate(uri => {
+                        if (uri.fsPath.includes('.git/')) return;
+                        logChannel.appendLine(`Shadow file created (${proj.name}): ${uri.fsPath}. Refreshing view.`);
+                        treeDataProvider.refresh();
+                    });
+                    shadowWatcher.onDidChange(uri => {
+                        if (uri.fsPath.includes('.git/')) return;
+                        logChannel.appendLine(`Shadow file changed (${proj.name}): ${uri.fsPath}. Refreshing view.`);
+                        treeDataProvider.refresh();
+                    });
+                    shadowWatcher.onDidDelete(uri => {
+                        if (uri.fsPath.includes('.git/')) return;
+                        logChannel.appendLine(`Shadow file deleted (${proj.name}): ${uri.fsPath}. Refreshing view.`);
+                        treeDataProvider.refresh();
+                    });
+                    context.subscriptions.push(shadowWatcher);
+                    fileSystemWatchers.push(shadowWatcher);
+                 } catch (error: any) {
+                     logChannel.appendLine(`Error creating shadow watcher for ${proj.path} (${proj.name}): ${error.message}`);
+                 }
+             } else {
+                 logChannel.appendLine(`Skipping watcher setup for non-existent shadow project path: ${proj.path} (${proj.name})`);
+             }
+        });
+        logChannel.appendLine(`Finished setting up ${fileSystemWatchers.length} watchers.`);
+    }
+
+    // Initial setup
+    setupFileSystemWatchers();
+    logChannel.appendLine('Initial file system watchers set up.');
 
 
     // --- Register Commands ---
@@ -1313,9 +1408,11 @@ export function activate(context: vscode.ExtensionContext) {
                 if (operation === 'copy') {
                     await fsPromises.copyFile(sourceUri.fsPath, targetPath);
                     logChannel.appendLine(`File copied successfully to ${targetPath}`);
+                    treeDataProvider.refresh(); // Refresh view after copy
                 } else { // move
                     await fsPromises.rename(sourceUri.fsPath, targetPath);
                     logChannel.appendLine(`File moved successfully to ${targetPath}`);
+                    treeDataProvider.refresh(); // Refresh view after move
                 }
                 return true; // Indicate success
             } else {
@@ -1767,6 +1864,7 @@ export function activate(context: vscode.ExtensionContext) {
         const latestProjects = getStoredProjects(); // Get latest list after change
         treeDataProvider.updateWorkspaceRoot(getCurrentWorkspaceRoot());
         treeDataProvider.updateShadowProjects(latestProjects);
+        setupFileSystemWatchers(); // Re-setup watchers
     }));
 
     logChannel.appendLine(`Commands registered. Total subscriptions: ${context.subscriptions.length}`);

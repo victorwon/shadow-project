@@ -3,7 +3,7 @@
   "displayName": "Shadow Projects (Merged View)",
   "publisher": "VictorWeng",
   "description": "Merges files from multiple external 'shadow' project folders into the main explorer view.",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "icon": "images/logo.png",
   "repository": {
     "type": "git",
