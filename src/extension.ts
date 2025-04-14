@@ -728,6 +728,7 @@ export function activate(context: vscode.ExtensionContext) {
             if (name) {
                 const newProject: ShadowProject = { name, path: newPath };
                 const newProjectUri = folderUri[0]; // URI of the selected folder
+                const rootFolderName = path.basename(newPath); // Extract root folder name
 
                 // --- Add to Workspace Folders ---
                 const currentFolders = vscode.workspace.workspaceFolders ? vscode.workspace.workspaceFolders.map(f => f) : []; // Get a mutable copy
@@ -735,7 +736,7 @@ export function activate(context: vscode.ExtensionContext) {
 
                 if (folderIndex === -1) {
                     logChannel.appendLine(`Adding folder to workspace: ${newProjectUri.fsPath}`);
-                    const success = vscode.workspace.updateWorkspaceFolders(currentFolders.length, 0, { uri: newProjectUri, name: `${name} (Shadow)` }); // Add at the end with name
+                    const success = vscode.workspace.updateWorkspaceFolders(currentFolders.length, 0, { uri: newProjectUri, name: `${rootFolderName} (${name})` }); // Add at the end with name
                     if (!success) {
                         logChannel.appendLine('Failed to add folder to workspace.');
                         vscode.window.showWarningMessage(`Failed to add folder "${name}" to the workspace automatically.`);
