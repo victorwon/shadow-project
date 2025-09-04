@@ -562,6 +562,23 @@ async function findAndOpenFileInSplit(
 ): Promise<FoundFileInfo | undefined> { // Return FoundFileInfo or undefined
     logChannel.appendLine(`Attempting to find and open path in split: ${potentialPath}`);
 
+    // Helper function to check if file is already open anywhere and focus it
+    const checkAndFocusExistingEditor = (uri: vscode.Uri): boolean => {
+        // Check all tab groups to find where the file might be open
+        for (const tabGroup of vscode.window.tabGroups.all) {
+            for (const tab of tabGroup.tabs) {
+                if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === uri.fsPath) {
+                    logChannel.appendLine(`File found in tab group ${tabGroup.viewColumn}, focusing existing location: ${uri.fsPath}`);
+                    // Focus the tab in its original view column
+                    vscode.window.showTextDocument(tab.input.uri, { viewColumn: tabGroup.viewColumn });
+                    return true;
+                }
+            }
+        }
+        
+        return false; // File not open anywhere, proceed with split creation
+    };
+
     // 1. Check Workspace
     if (workspaceRoot) {
         // Resolve relative to workspace root IF the potential path is relative
@@ -578,6 +595,13 @@ async function findAndOpenFileInSplit(
             if (await fileExists(workspaceFilePath)) {
                 logChannel.appendLine(`Found in workspace: ${workspaceFilePath}`);
                 const uri = vscode.Uri.file(workspaceFilePath);
+                
+                // Check if file is already open, if so focus it instead of creating new split
+                if (checkAndFocusExistingEditor(uri)) {
+                    return { uri, type: 'workspace' };
+                }
+                
+                // File not open, create new split
                 await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
                 return { uri, type: 'workspace' };
             }
@@ -599,6 +623,20 @@ async function findAndOpenFileInSplit(
             if (await fileExists(shadowFilePath)) {
                 logChannel.appendLine(`Found in shadow project "${proj.name}": ${shadowFilePath}`);
                 const uri = vscode.Uri.file(shadowFilePath);
+                
+                // Check if file is already open, if so focus it instead of creating new split
+                if (checkAndFocusExistingEditor(uri)) {
+                    // Construct MergedItemSource for the found shadow file
+                    const shadowSource: MergedItemSource = {
+                        projectName: proj.name,
+                        projectPath: proj.path,
+                        fullPath: shadowFilePath,
+                        fileType: vscode.FileType.File // We know it's a file because fileExists passed
+                    };
+                    return { uri, type: 'shadow', shadowSource };
+                }
+                
+                // File not open, create new split
                 await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
                 // Construct MergedItemSource for the found shadow file
                 const shadowSource: MergedItemSource = {
