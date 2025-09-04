@@ -552,6 +552,73 @@ async function findAndOpenFile(
     return undefined;
 }
 
+// Helper function to find and open the first valid file match in a split window
+async function findAndOpenFileInSplit(
+    potentialPath: string,
+    workspaceRoot: string | undefined,
+    shadowProjects: ShadowProject[],
+    workspaceIg: Ignore | undefined,
+    shadowIgs: Map<string, Ignore>
+): Promise<FoundFileInfo | undefined> { // Return FoundFileInfo or undefined
+    logChannel.appendLine(`Attempting to find and open path in split: ${potentialPath}`);
+
+    // 1. Check Workspace
+    if (workspaceRoot) {
+        // Resolve relative to workspace root IF the potential path is relative
+        // If potentialPath is absolute, resolve will just return it.
+        // If potentialPath is relative, it resolves relative to workspaceRoot.
+        const workspaceFilePath = path.resolve(workspaceRoot, potentialPath);
+        const relativeWorkspacePath = path.relative(workspaceRoot, workspaceFilePath);
+        const workspacePathToCheck = relativeWorkspacePath; // For ignore check
+
+        logChannel.appendLine(`Checking workspace: ${workspaceFilePath} (relative: ${relativeWorkspacePath})`);
+
+        // Check ignore using the path relative to the workspace root
+        if (!workspaceIg?.ignores(workspacePathToCheck)) {
+            if (await fileExists(workspaceFilePath)) {
+                logChannel.appendLine(`Found in workspace: ${workspaceFilePath}`);
+                const uri = vscode.Uri.file(workspaceFilePath);
+                await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
+                return { uri, type: 'workspace' };
+            }
+        } else {
+            logChannel.appendLine(`Ignoring workspace path: ${workspacePathToCheck}`);
+        }
+    }
+
+    // 2. Check Shadow Projects
+    for (const proj of shadowProjects) {
+        const shadowFilePath = path.resolve(proj.path, potentialPath);
+        const relativeShadowPath = path.relative(proj.path, shadowFilePath);
+        const shadowPathToCheck = relativeShadowPath; // For ignore check
+        const ig = shadowIgs.get(proj.path);
+
+        logChannel.appendLine(`Checking shadow project "${proj.name}": ${shadowFilePath} (relative: ${relativeShadowPath})`);
+
+        if (!ig?.ignores(shadowPathToCheck)) {
+            if (await fileExists(shadowFilePath)) {
+                logChannel.appendLine(`Found in shadow project "${proj.name}": ${shadowFilePath}`);
+                const uri = vscode.Uri.file(shadowFilePath);
+                await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
+                // Construct MergedItemSource for the found shadow file
+                const shadowSource: MergedItemSource = {
+                    projectName: proj.name,
+                    projectPath: proj.path,
+                    fullPath: shadowFilePath,
+                    fileType: vscode.FileType.File // We know it's a file because fileExists passed
+                };
+                return { uri, type: 'shadow', shadowSource };
+            }
+        } else {
+             logChannel.appendLine(`Ignoring shadow path in "${proj.name}": ${shadowPathToCheck}`);
+        }
+    }
+
+    // 3. Not Found
+    logChannel.appendLine(`Path not found in workspace or any shadow project: ${potentialPath}`);
+    return undefined;
+}
+
 
 // --- Extension Activation ---
 export function activate(context: vscode.ExtensionContext) {
@@ -1372,6 +1439,144 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // --- NEW COMMAND: Open Shadow File from Path in Split ---
+    const openShadowFileFromPathInSplit = vscode.commands.registerCommand('shadow-project.openShadowFileFromPathInSplit', async () => {
+        logChannel.appendLine('Command: openShadowFileFromPathInSplit triggered.');
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            logChannel.appendLine('No active text editor.');
+            return;
+        }
+
+        const document = editor.document;
+        const position = editor.selection.active;
+        const currentWorkspaceRoot = getCurrentWorkspaceRoot(); // Use existing helper
+
+        let potentialPath: string | undefined;
+        let isLinkPath = false; // Flag to know if path came from link provider
+
+        // Try using link provider first
+        try {
+            const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+                'vscode.executeLinkProvider',
+                document.uri,
+                // Add a cancellation token in case it takes too long
+                new vscode.CancellationTokenSource().token
+            );
+            // Find the most specific link containing the position
+            const linkAtPosition = links
+                .filter(link => link.range.contains(position))
+                .sort((a, b) => {
+                    // Sort by range length (smaller range is more specific)
+                    const lengthA = document.offsetAt(a.range.end) - document.offsetAt(a.range.start);
+                    const lengthB = document.offsetAt(b.range.end) - document.offsetAt(b.range.start);
+                    return lengthA - lengthB;
+                })[0]; // Get the first one (most specific)
+
+            if (linkAtPosition?.target) {
+                // Link targets can be URIs or strings. Handle URI case.
+                if (linkAtPosition.target instanceof vscode.Uri) {
+                    potentialPath = linkAtPosition.target.fsPath;
+                } else if (typeof linkAtPosition.target === 'string') {
+                     // If it's a string, it might be a relative path or something else
+                     // We'll treat it as a potential path string for now
+                     potentialPath = linkAtPosition.target;
+                }
+                if (potentialPath) {
+                    isLinkPath = true;
+                    logChannel.appendLine(`Found path via link provider: ${potentialPath}`);
+                }
+            }
+        } catch (err) {
+            // Log but don't fail, fallback will handle it
+            logChannel.appendLine(`Error executing link provider: ${err}`);
+        }
+
+        // Fallback: Get text around cursor if no link found
+        if (!potentialPath) {
+            // Regex to capture typical file paths (including relative ./ ../ and spaces if quoted)
+            // This is a basic attempt and might need refinement
+            const pathRegex = /(['"])([^'"]+\.\w+)\1|([\w\/\.\-\_]+(?:\.[\w]+))|(\.\.?\/[\w\/\.\-\_]+)/;
+            const wordRange = document.getWordRangeAtPosition(position, pathRegex);
+            if (wordRange) {
+                potentialPath = document.getText(wordRange);
+                // Basic cleanup (remove surrounding quotes)
+                potentialPath = potentialPath.replace(/^['"]|['"]$/g, '');
+                logChannel.appendLine(`Found potential path via word range: ${potentialPath}`);
+            }
+        }
+
+        if (!potentialPath) {
+            logChannel.appendLine('No potential path found at cursor.');
+            vscode.window.showInformationMessage('Shadow Project: No file path found at cursor.');
+            return;
+        }
+
+        // Determine the path to use for searching
+        let searchPath = potentialPath;
+        // If the path starts with '/' AND it didn't come from a link provider (which might be a valid absolute URI)
+        // treat it as relative-from-root by stripping the leading '/'.
+        if (potentialPath.startsWith('/') && !isLinkPath) {
+            searchPath = potentialPath.substring(1);
+            logChannel.appendLine(`Path started with '/'; treating as relative to project roots: ${searchPath}`);
+        } else if (potentialPath.startsWith('/') && isLinkPath) {
+             logChannel.appendLine(`Path from link provider starts with '/'; treating as absolute: ${potentialPath}`);
+             // Keep searchPath as potentialPath for absolute check
+        } else {
+             logChannel.appendLine(`Path does not start with '/'; treating as relative or absolute: ${potentialPath}`);
+             // Keep searchPath as potentialPath for relative/absolute check
+        }
+
+        // Get current state for searching
+        const currentProjects = getStoredProjects();
+        // Access ignore instances safely from the treeDataProvider
+        const workspaceIg = treeDataProvider.workspaceIg;
+        const shadowIgs = treeDataProvider.shadowIgs;
+
+        // Search and open using the split helper function
+        const findResult = await findAndOpenFileInSplit(searchPath, currentWorkspaceRoot, currentProjects, workspaceIg, shadowIgs);
+
+        if (findResult) {
+            // File opened successfully, now reveal it in the tree view
+            if (shadowTreeView) {
+                try {
+                    let itemToReveal: vscode.TreeItem | undefined;
+                    const itemName = path.basename(findResult.uri.fsPath);
+
+                    if (findResult.type === 'workspace') {
+                        // Construct a basic TreeItem for workspace files matching how getChildren creates them
+                        itemToReveal = new vscode.TreeItem(itemName, vscode.TreeItemCollapsibleState.None);
+                        itemToReveal.resourceUri = findResult.uri;
+                        itemToReveal.contextValue = 'workspaceFile'; // Match context value
+                        itemToReveal.command = { command: 'vscode.open', title: "Open File", arguments: [findResult.uri] }; // Add command
+                    } else if (findResult.type === 'shadow' && findResult.shadowSource) {
+                        // Construct the specific ShadowFileItem
+                        itemToReveal = new ShadowFileItem(itemName, findResult.shadowSource);
+                        // ShadowFileItem constructor sets resourceUri, description, contextValue, command
+                    }
+
+                    if (itemToReveal) {
+                        logChannel.appendLine(`Revealing opened file in tree view: ${findResult.uri.fsPath}`);
+                        // Simplify options: select the item, but don't force focus or expansion initially
+                        await shadowTreeView.reveal(itemToReveal, { select: true, focus: false, expand: false });
+                    } else {
+                         logChannel.appendLine(`Could not construct TreeItem for reveal: ${findResult.uri.fsPath}`);
+                    }
+
+                } catch (revealError: any) {
+                    logChannel.appendLine(`Error revealing item in tree view: ${revealError.message}`);
+                    // Don't bother the user, just log it.
+                }
+            } else {
+                logChannel.appendLine('Shadow tree view not available to reveal item.');
+            }
+        } else {
+            // File not found or couldn't be opened
+            // Use the original potentialPath for the message
+            vscode.window.showInformationMessage(`Shadow Project: Could not find '${potentialPath}' in workspace or shadow projects.`);
+        }
+    });
+
     // --- Helper Function for Copy/Move Operations ---
     async function performFileSystemOperation(
         operation: 'copy' | 'move',
@@ -1851,6 +2056,7 @@ export function activate(context: vscode.ExtensionContext) {
         compareSelectedFiles,
         openItemInContainingProjectCommand,
         openShadowFileFromPath,
+        openShadowFileFromPathInSplit,
         copyToShadow,
         copyToWorkspace,
         refreshView,

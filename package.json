@@ -3,7 +3,7 @@
   "displayName": "Shadow Projects (Merged View)",
   "publisher": "VictorWeng",
   "description": "Merges files from multiple external 'shadow' project folders into the main explorer view.",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "icon": "images/logo.png",
   "repository": {
     "type": "git",
@@ -64,6 +64,11 @@
       {
         "command": "shadow-project.openShadowFileFromPath",
         "title": "Open Shadow File from Path under Cursor",
+        "category": "Shadow Projects"
+      },
+      {
+        "command": "shadow-project.openShadowFileFromPathInSplit",
+        "title": "Open Shadow File from Path under Cursor in Split",
         "category": "Shadow Projects"
       },
       {
@@ -190,6 +195,19 @@
         "key": "ctrl+r",
         "win": "ctrl+r",
         "linux": "ctrl+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "shadow-project.openShadowFileFromPathInSplit",
+        "key": "cmd+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "shadow-project.openShadowFileFromPathInSplit",
+        "key": "ctrl+shift+r",
+        "win": "ctrl+shift+r",
+        "linux": "ctrl+shift+r",
         "when": "editorTextFocus"
       }
     ]
